@@ -84,7 +84,7 @@ Suggested fix: do not read `replication_group_communication_information` on ever
 - `StartGroupReplication(bootstrap)` left `group_replication_bootstrap_group=ON` when `START` outlived the caller's context: the reset reused the expired context. A later join would bootstrap a second group. **Fixed** (a49bfc9, with a unit test).
 - `TestStopGroupReplicationRestoresReadWriteOnPrimary` was flaky early on this branch (2/40 runs). It no longer fails: 0 of 2,900 runs, 2,400 of them on 8 loaded parallel processes. `TestWaitForDBAGrants` fails in this environment.
 - `TestPausedPrimaryKeepsTheServingInvariant` failed in about 1% of runs under load. This came from a race in the tablet, not the test. `legitimateGroup` built the group from the voter server_uuids it knew, then looked for the voters it could not identify. The sync loop's background fetch (`warmVoterServerUUIDs`) could learn them in between: nothing was missing any more, so it returned the group built before, which lacked those voters. A primary with its voter majority could then stop serving for "lost the majority of its voters" until the next sync run, and a promotion could be refused once the same way. **Fixed**: the group is built again when no voter is missing. 0 of 4,800 runs fail under the load that failed 22 of 2,400 before.
-- `go test -race` reports a race in `TestGetDetectionAnalysisGroupReplication`. It comes from a bug in `go/viperutil` that is the same on `main`, not from this branch: see "Outside Group Replication: config reads race with config writes".
+- `go test -race` reported a race in `TestGetDetectionAnalysisGroupReplication`. It came from a bug in `go/viperutil` that is the same on `main`, not from this branch, and is now fixed: see "Outside Group Replication: config reads race with config writes".
 - S8 does not exercise its fault in GR mode: VTOrc never starts an ERS for `DeadPrimary` within 60s (the group elects first).
 
 ## Fixes in this branch
@@ -1132,7 +1132,7 @@ CHAOS_SOAK_DURATION=2h CHAOS_SOAK_SEED=20261006 CHAOS_DURABILITY=group_replicati
 
 ## Outside Group Replication: config reads race with config writes
 
-Found while checking a race that `go test -race` reports in `TestGetDetectionAnalysisGroupReplication` (`go/vt/vtorc/inst`). The bug is the same on `main` (checked against e5e0091). This branch does not change `go/viperutil`, and does not fix it: it belongs in its own upstream PR, since every Vitess component reads its dynamic configuration through this code.
+Found while checking a race that `go test -race` reports in `TestGetDetectionAnalysisGroupReplication` (`go/vt/vtorc/inst`). The bug is the same on `main` (checked against e5e0091). It is fixed as proposed below, on branch `viperutil-config-race` from `main` (d4614310ff), for its own upstream PR since every Vitess component reads its dynamic configuration through this code, and cherry-picked here (e0289dc7de).
 
 **What races.** `go/viperutil/internal/sync/sync.go` guards each key with its own `sync.RWMutex`, and the live `viper.Viper` with one shared `sync.Mutex`, `v.m` (line 43):
 
@@ -1155,7 +1155,7 @@ Viper keeps every key's override in one map. A `Set` of one key therefore writes
 
 Every path that takes both locks takes the key lock first and `v.m` second, so this adds no lock-order inversion. A read lock on every config read costs little: readers only exclude `Set`, a reload and a config write.
 
-**Test.** A unit test in `go/viperutil/internal/sync` that, under `-race`, runs a getter of one key concurrently with `Set` of another key, and with `loadFromDisk`. It fails on `main` with the race detector's report.
+**Test.** `TestGetterDoesNotRaceWithSetOrReload` (`go/viperutil/internal/sync`) runs, under `-race`, a getter of one key concurrently with `Set` of another key and with `loadFromDisk`. It fails on `main` with ten race reports, and passes 20 times with the fix; `TestGetDetectionAnalysisGroupReplication -race -count=5` passes too. (`TestWatchConfig` in the same package fails with `-count` above 1 on `main` as well: it registers keys in a global registry, and the second iteration panics with "already adapted a getter".)
 
 ## Findings of the second model milestone and the chaos sweep: eight fixes
 
