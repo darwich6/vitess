@@ -571,13 +571,18 @@ func TestPickErrorOnlySpecified(t *testing.T) {
 	}()
 	SetTabletPickerRetryDelay(11 * time.Millisecond)
 
-	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 20*time.Millisecond)
-	defer timeoutCancel()
 	logs := logtest.Capture(t, slog.LevelInfo)
 	// no tablets
-	_, err = tp.PickForStreaming(timeoutCtx)
-	require.EqualError(t, err, "context has expired")
+	pickCtx, pickCancel := context.WithCancel(ctx)
+	t.Cleanup(pickCancel)
+	pickErr := make(chan error, 1)
+	go func() {
+		_, err := tp.PickForStreaming(pickCtx)
+		pickErr <- err
+	}()
 	record := logs.Wait(t, "No healthy serving tablet found for streaming, sleeping")
+	pickCancel()
+	require.EqualError(t, <-pickErr, "context has expired")
 	assert.Equal(t, "INFO", record["level"])
 	assert.Equal(t, "ks", record["keyspace"])
 	assert.Equal(t, "0", record["shard"])
@@ -587,7 +592,7 @@ func TestPickErrorOnlySpecified(t *testing.T) {
 	assert.EqualValues(t, 11*time.Millisecond, record["retry_delay"])
 	// no tablets of the correct type
 	defer deleteTablet(t, te, addTablet(ctx, te, 200, topodatapb.TabletType_RDONLY, "cell", true, true))
-	timeoutCtx, timeoutCancel = context.WithTimeout(ctx, 20*time.Millisecond)
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer timeoutCancel()
 	_, err = tp.PickForStreaming(timeoutCtx)
 	require.EqualError(t, err, "context has expired")
